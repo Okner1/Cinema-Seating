@@ -211,7 +211,11 @@ export async function reserve(
   const client = await pool.connect();
   let released = false;
   try {
-    await client.query('BEGIN');
+    // Pinned explicitly: the whole design leans on READ COMMITTED's per-statement
+    // snapshots (see OCCUPANCY_SQL). A session default of REPEATABLE READ would
+    // freeze the snapshot for the whole transaction and silently bring the
+    // double-hold back.
+    await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
 
     // Serialize this user's concurrent attempts on this instance. Without it
     // the one-group guard below is racy in exactly one way: two simultaneous
@@ -286,7 +290,7 @@ export async function reserve(
 
     await client.query(
       `INSERT INTO reservation_seats (reservation_id, seat_id)
-       SELECT $1, unnest($2::int[])`,
+       SELECT $1::int, unnest($2::int[])`,
       [reservationId, orderedSeatIds],
     );
 
@@ -307,8 +311,10 @@ export async function reserve(
       // "connection lost"). Destroy it instead of handing it back poisoned, and
       // remember that, so `finally` does not release a second time.
       console.error('ROLLBACK failed', rollbackErr);
-      client.release(true);
+      // Flag first: if release() itself throws, `finally` must not release a
+      // second time and mask the original error.
       released = true;
+      client.release(true);
     }
     throw err;
   } finally {

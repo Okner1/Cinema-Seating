@@ -52,7 +52,7 @@ async function seedReservation(
   );
   const reservationId = inserted.rows[0].id;
   await pool.query(
-    `INSERT INTO reservation_seats (reservation_id, seat_id) SELECT $1, unnest($2::int[])`,
+    `INSERT INTO reservation_seats (reservation_id, seat_id) SELECT $1::int, unnest($2::int[])`,
     [reservationId, ids],
   );
   return reservationId;
