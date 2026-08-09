@@ -55,12 +55,16 @@ Mutations are REST (not WS) because HTTP gives request/response correlation, sta
 ### Reservation transaction (the core)
 1. **Pre-DB validation (cheap, fail fast):** non-empty array, all seats in the same row, seat numbers consecutive after sorting. No group-size cap (row length caps it naturally).
 2. `BEGIN` → `SELECT ... FOR UPDATE` on **all seats of that row in that instance**, in a single statement ordered by seat number (consistent order → no deadlocks). Locking the whole row is required because Rule 2 depends on neighbor seats outside the selection; locking only selected seats allows two concurrent valid-alone holds to jointly trap a single empty seat.
-3. Compute row occupancy with **lazy expiry**: a seat is occupied iff it belongs to a `booked` reservation or a `held` reservation with `expires_at > now()`.
+3. Compute row occupancy with **lazy expiry**: a seat is occupied iff it belongs to a `booked` reservation or a `held` reservation with `expires_at > clock_timestamp()`.
 4. Validate availability + Rule 1 (consecutive, same row) + Rule 2 (no single empty seat trapped between occupied seats; single empty seat at row edge is fine).
-5. Insert `reservations` (status `held`, `expires_at = now() + 15 min`) + `reservation_seats` rows → `COMMIT`.
+5. Insert `reservations` (status `held`, `expires_at = clock_timestamp() + 15 min`) + `reservation_seats` rows → `COMMIT`.
 6. On commit, `NOTIFY` fires (see below) and the response returns `{reservationId, expiresAt}`.
 
-**Book:** transaction — lock the reservation row, verify owner, status `held`, `expires_at > now()`, flip to `booked`. Booking by **reservationId** guarantees the user books exactly the group they held; group expiry is atomic (no per-seat drift).
+**Timestamp discipline — `clock_timestamp()`, never `now()`:** `now()`/`CURRENT_TIMESTAMP` are frozen at transaction start; a transaction that waited on a `FOR UPDATE` lock re-reads fresh data (READ COMMITTED re-evaluates after lock waits) but would compare it against a stale clock. On the reserve side that is merely conservative (an expired hold counts as occupied a moment longer). On the book side it is a correctness bug: a book transaction that began before a hold's expiry and waited out a lock could book an expired group that another user has meanwhile legitimately re-reserved — a double claim. All expiry comparisons and `expires_at` computations therefore use `clock_timestamp()` (wall clock at evaluation time).
+
+**Book:** transaction — lock the reservation row (verify owner, status `held`), **then lock the row's seats with the same ordered `FOR UPDATE` statement reserve uses**, then check `expires_at > clock_timestamp()` and flip to `booked`. The seat locks are load-bearing: without them, book (reservation lock only) and a concurrent reserve (seat locks only) hold disjoint locks and can interleave — an expired-then-re-reserved group could still be booked. With them, book and reserve on the same row serialize, and the loser sees the winner's committed state. Booking by **reservationId** guarantees the user books exactly the group they held; group expiry is atomic (no per-seat drift).
+
+**Lock-ordering rule (deadlock freedom):** any transaction touching both lock types acquires the **reservation row first, then the row's seats** (seats always via the single ordered statement). Book and PATCH-modify follow this order; POST-reserve locks seats only (no reservation exists yet); the sweeper locks reservation rows only. No ordering cycle exists, so no deadlocks.
 
 **Expiry:** lazy expiry in every query is the source of truth; a background **sweeper** periodically flips expired `held` reservations to `expired` and broadcasts the freed seats so watching clients see them open without acting.
 
