@@ -124,6 +124,44 @@ describe('getSnapshot', () => {
     expect(booked.userId).toBe(userId);
   });
 
+  it('collapses a seat carrying both dead and live reservations to one reserved entry', async () => {
+    const instanceId = await mainHallId();
+    const deadUserId = await createUser('snapshot-lapsed');
+    const liveUserId = await createUser('snapshot-current');
+
+    // Nothing in the schema stops one seat from being linked to several
+    // reservations, so a seat can produce several rows out of the join: the
+    // dead ones come back with NULL reservation columns and must never mask
+    // the live hold. Both insertion orders are covered because the join row
+    // order is not guaranteed.
+    const deadFirstSeat = await seatId(instanceId, 5, 5);
+    await createReservation(deadUserId, instanceId, 'held', -30, [deadFirstSeat]);
+    await createReservation(liveUserId, instanceId, 'held', 15, [deadFirstSeat]);
+
+    const liveFirstSeat = await seatId(instanceId, 6, 6);
+    await createReservation(liveUserId, instanceId, 'held', 15, [liveFirstSeat]);
+    await createReservation(deadUserId, instanceId, 'released', 15, [liveFirstSeat]);
+
+    const snapshot = await getSnapshot(instanceId);
+
+    // The count only holds if the extra join rows were collapsed away.
+    expect(snapshot).toHaveLength(115);
+
+    for (const [row, number] of [
+      [5, 5],
+      [6, 6],
+    ] as const) {
+      expect(snapshot.filter((s) => s.row === row && s.number === number)).toHaveLength(1);
+      const seat = seatAt(snapshot, row, number);
+      expect(seat.status).toBe('reserved');
+      expect(seat.userId).toBe(liveUserId);
+      expect(seat.expiresAt).toMatch(ISO_UTC);
+      expect(new Date(seat.expiresAt as string).getTime()).toBeGreaterThan(Date.now());
+    }
+
+    expect(new Set(snapshot.map((s) => s.id)).size).toBe(115);
+  });
+
   it('ignores released reservations', async () => {
     const instanceId = await mainHallId();
     const userId = await createUser('snapshot-quitter');
