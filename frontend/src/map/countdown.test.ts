@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mmss, msLeft } from './countdown';
+import { expiryTick, mmss, msLeft } from './countdown';
 
 const NOW = Date.parse('2026-08-09T12:00:00.000Z');
 
@@ -33,6 +33,39 @@ describe('msLeft', () => {
 
   it('treats an unparseable timestamp as expired', () => {
     expect(msLeft('not-a-date', NOW)).toBe(0);
+  });
+});
+
+describe('expiryTick', () => {
+  it('never expires a hold that has just been granted', () => {
+    // The regression: the countdown used to decide expiry by comparing the
+    // previously rendered `left` (still 0) against the new `expiresAt`, so a
+    // fresh hold was declared expired on the very render it arrived and wiped
+    // immediately — leaving Book/Reset dead. The decision now comes from
+    // `expiresAt` alone, so the null → ISO transition cannot expire anything.
+    const fresh = new Date(NOW + 15 * 60_000).toISOString();
+    expect(expiryTick(fresh, NOW).expired).toBe(false);
+    expect(expiryTick(fresh, NOW)).toEqual({ left: 15 * 60_000, expired: false });
+  });
+
+  it('never expires when there is no hold', () => {
+    expect(expiryTick(null, NOW).expired).toBe(false);
+    expect(expiryTick(null, NOW)).toEqual({ left: 0, expired: false });
+  });
+
+  it('expires a hold that has lapsed', () => {
+    expect(expiryTick(new Date(NOW - 1).toISOString(), NOW)).toEqual({ left: 0, expired: true });
+    expect(expiryTick(new Date(NOW).toISOString(), NOW)).toEqual({ left: 0, expired: true });
+  });
+
+  it('flips to expired only once the clock passes expiresAt', () => {
+    const held = new Date(NOW + 1_000).toISOString();
+    expect(expiryTick(held, NOW + 999)).toEqual({ left: 1, expired: false });
+    expect(expiryTick(held, NOW + 1_000)).toEqual({ left: 0, expired: true });
+  });
+
+  it('treats an unparseable timestamp as expired', () => {
+    expect(expiryTick('not-a-date', NOW)).toEqual({ left: 0, expired: true });
   });
 });
 

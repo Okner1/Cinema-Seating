@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import styled from 'styled-components';
-import { mmss, msLeft } from './countdown';
+import { expiryTick, mmss } from './countdown';
 
 const Bar = styled.div`
   display: flex;
@@ -74,23 +74,20 @@ export default function ReservationBar({
   onBook,
   onReset,
 }: ReservationBarProps) {
-  const [left, setLeft] = useState(() => msLeft(expiresAt));
+  const [left, setLeft] = useState(() => expiryTick(expiresAt).left);
 
-  // Expiry is decided inside the tick, from `expiresAt` alone. Deciding it in a
-  // separate effect over the `left` state would fire on the render where a hold
-  // first appears — while `left` still held the previous 0 — and kill the hold
-  // the moment it was created.
+  // The tick asks `expiryTick` for both numbers and does nothing else. Deciding
+  // expiry here — from the rendered `left` — would fire on the render where a
+  // hold first appears, while `left` still held the previous 0, and kill the
+  // hold the moment it was created.
   useEffect(() => {
-    if (expiresAt === null) {
-      setLeft(0);
-      return;
-    }
     const tick = () => {
-      const ms = msLeft(expiresAt);
+      const { left: ms, expired } = expiryTick(expiresAt);
       setLeft(ms);
-      if (ms <= 0) onExpire();
+      if (expired) onExpire();
     };
     tick();
+    if (expiresAt === null) return;
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [expiresAt, onExpire]);

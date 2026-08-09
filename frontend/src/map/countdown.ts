@@ -12,6 +12,26 @@ export function msLeft(expiresAt: string | null, now: number = Date.now()): numb
   return Number.isNaN(left) ? 0 : Math.max(0, left);
 }
 
+/** One evaluation of the countdown: what to display, and whether the hold is over. */
+export interface ExpiryTick {
+  left: number;
+  expired: boolean;
+}
+
+/**
+ * The whole countdown decision, as a pure function of `expiresAt` and the clock.
+ *
+ * `expired` is true only when a hold exists *and* has lapsed — never for `null`
+ * (nothing to expire) and never while time remains. Keeping the decision here,
+ * rather than in an effect comparing against previously rendered state, is what
+ * makes it impossible for a hold to be declared expired on the render where it
+ * first appears.
+ */
+export function expiryTick(expiresAt: string | null, now: number = Date.now()): ExpiryTick {
+  const left = msLeft(expiresAt, now);
+  return { left, expired: expiresAt !== null && left <= 0 };
+}
+
 /** `msLeft` rendered as `mm:ss`, rounding up so the last second is visible. */
 export function mmss(ms: number): string {
   const total = Math.ceil(ms / 1000);
