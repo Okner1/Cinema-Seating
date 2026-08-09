@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { authRouter } from './auth/routes.js';
 import { instancesRouter } from './instances/routes.js';
+import { reservationsRouter } from './reservations/routes.js';
 
 /**
  * Terminal error handler. Express only treats a 4-argument middleware as an
@@ -32,6 +33,7 @@ export function createApp(): express.Express {
   app.use(cookieParser());
   app.use('/api/auth', authRouter);
   app.use('/api/map-instances', instancesRouter);
+  app.use('/api/reservations', reservationsRouter);
   app.use(errorHandler);
   return app;
 }
