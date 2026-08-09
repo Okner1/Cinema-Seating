@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import styled from 'styled-components';
+import { mmss, msLeft } from './countdown';
 
 const Bar = styled.div`
   display: flex;
@@ -44,20 +45,6 @@ const Toast = styled.p`
   font-size: 14px;
 `;
 
-/** Milliseconds left on the hold, floored at 0. */
-function msLeft(expiresAt: string | null): number {
-  if (expiresAt === null) return 0;
-  const left = Date.parse(expiresAt) - Date.now();
-  return Number.isNaN(left) ? 0 : Math.max(0, left);
-}
-
-function mmss(ms: number): string {
-  const total = Math.ceil(ms / 1000);
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
 export interface ReservationBarProps {
   /** Server timestamp the hold expires at, or `null` when nothing is held. */
   expiresAt: string | null;
@@ -89,16 +76,24 @@ export default function ReservationBar({
 }: ReservationBarProps) {
   const [left, setLeft] = useState(() => msLeft(expiresAt));
 
+  // Expiry is decided inside the tick, from `expiresAt` alone. Deciding it in a
+  // separate effect over the `left` state would fire on the render where a hold
+  // first appears — while `left` still held the previous 0 — and kill the hold
+  // the moment it was created.
   useEffect(() => {
-    setLeft(msLeft(expiresAt));
-    if (expiresAt === null) return;
-    const timer = setInterval(() => setLeft(msLeft(expiresAt)), 1000);
+    if (expiresAt === null) {
+      setLeft(0);
+      return;
+    }
+    const tick = () => {
+      const ms = msLeft(expiresAt);
+      setLeft(ms);
+      if (ms <= 0) onExpire();
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [expiresAt]);
-
-  useEffect(() => {
-    if (expiresAt !== null && left <= 0) onExpire();
-  }, [expiresAt, left, onExpire]);
+  }, [expiresAt, onExpire]);
 
   const held = expiresAt !== null;
 

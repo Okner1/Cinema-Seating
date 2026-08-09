@@ -169,7 +169,10 @@ export default function MapPage() {
   }, [commitRange]);
 
   const handleSeatMouseDown = (seat: Seat) => {
-    if (seat.status !== 'available') return;
+    // A drag begun mid-mutation would be committed against a hold that is about
+    // to change, so `commitRange` refuses it. Refusing the drag up front keeps
+    // the preview honest: nothing lights up that will not be sent.
+    if (pending || seat.status !== 'available') return;
     drag.current = { anchor: seat, range: [seat.id] };
     setPreview([seat.id]);
   };
