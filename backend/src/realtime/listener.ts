@@ -64,7 +64,12 @@ function onNotification(payload: string | undefined): void {
  */
 function session(): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const client = new Client({ connectionString: config.databaseUrl });
+    // `keepAlive` is load-bearing, not tuning: this connection can sit silent
+    // for hours between notifications, and without TCP keepalive a half-open
+    // link (NAT timeout, killed peer) emits neither 'error' nor 'end'. The loop
+    // would never reconnect, `seq` would stop advancing, and clients would keep
+    // receiving pings whose seq still matches — staleness nothing can detect.
+    const client = new Client({ connectionString: config.databaseUrl, keepAlive: true });
     active = client;
     let settled = false;
 

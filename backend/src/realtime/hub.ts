@@ -74,20 +74,15 @@ export function leave(instanceId: number, socket: HubSocket): void {
   if (room.size === 0) rooms.delete(instanceId);
 }
 
+/** instanceId -> the tail of the broadcast chain currently running for it. */
+const chains = new Map<number, Promise<void>>();
+
 /**
- * Pushes the current seat state of `instanceId` to everyone watching it.
- *
- * The payload is the WHOLE recomputed map rather than a minimal diff: 115 seats
- * is a few kilobytes, and re-deriving from the database makes every delta
- * self-contained — a client that applies it wholesale cannot drift, whatever it
- * missed. `seats` may be passed in by a caller that already has a snapshot in
- * hand; otherwise it is read here.
- *
- * The sequence number is assigned AFTER the read, so the order of `seq` values
- * always matches the order in which frames leave this process, even when two
- * notifications overlap.
+ * One broadcast pass: read the room's state and push it to every watcher.
+ * Runs only from `broadcast`, which guarantees no two passes for the same
+ * instance overlap.
  */
-export async function broadcast(instanceId: number, seats?: SeatView[]): Promise<void> {
+async function publish(instanceId: number, seats?: SeatView[]): Promise<void> {
   // Nobody is watching: skip the query entirely and leave `seq` alone. The next
   // client to connect gets a snapshot of live state either way.
   const watched = rooms.get(instanceId);
@@ -105,4 +100,43 @@ export async function broadcast(instanceId: number, seats?: SeatView[]): Promise
   for (const socket of room) {
     send(socket, { type: 'delta', seq, seats: personalize(state, socket.userId) });
   }
+}
+
+/**
+ * Pushes the current seat state of `instanceId` to everyone watching it.
+ *
+ * The payload is the WHOLE recomputed map rather than a minimal diff: 115 seats
+ * is a few kilobytes, and re-deriving from the database makes every delta
+ * self-contained — a client that applies it wholesale cannot drift, whatever it
+ * missed. `seats` may be passed in by a caller that already has a snapshot in
+ * hand; otherwise it is read here.
+ *
+ * PASSES FOR ONE INSTANCE ARE SERIALIZED, and that is load-bearing rather than
+ * defensive. Two overlapping passes read through different pooled connections,
+ * so the one that STARTED later can RETURN first; it would then take seq N+1
+ * with fresh state while the staler read takes N+2 and lands last. The client
+ * sees consecutive sequence numbers, detects no gap, never resyncs, and quietly
+ * displays state that is older than what it already had — the one failure this
+ * whole protocol is built to make impossible. Chaining each pass onto the
+ * previous one keeps read order, seq order and send order identical.
+ *
+ * The sequence number is assigned AFTER the read, so `seq` order always matches
+ * the order in which frames leave this process.
+ */
+export function broadcast(instanceId: number, seats?: SeatView[]): Promise<void> {
+  const previous = chains.get(instanceId) ?? Promise.resolve();
+  const current = previous.then(() => publish(instanceId, seats));
+
+  // The link the NEXT caller waits on must never reject, or one failed pass
+  // would poison every later one; this caller still sees the error via
+  // `current`.
+  const link = current.catch(() => undefined);
+  chains.set(instanceId, link);
+  void link.then(() => {
+    // Only the tail may clear the entry — anything newer has already chained
+    // onto this link and must stay reachable.
+    if (chains.get(instanceId) === link) chains.delete(instanceId);
+  });
+
+  return current;
 }

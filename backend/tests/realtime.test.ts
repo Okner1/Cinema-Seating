@@ -61,14 +61,43 @@ async function register(username: string): Promise<{ userId: number; cookie: str
   return { userId: res.body.id as number, cookie: setCookie[0].split(';')[0] };
 }
 
+/** Everything a socket has received that no assertion has claimed yet. */
+interface Inbox {
+  messages: ServerMessage[];
+  failure: Error | null;
+  notify: (() => void) | null;
+}
+
+const inboxes = new Map<WebSocket, Inbox>();
+
 /**
  * Opens a client socket with `cookie` and waits for the handshake. Every socket
  * is registered for teardown so a failing expectation cannot leave vitest
  * hanging on an open handle.
+ *
+ * Frames are buffered from CONSTRUCTION, before the handshake even completes.
+ * `ws` delivers messages as events and replays nothing, while the server sends
+ * the snapshot the instant a connection is accepted — a listener attached after
+ * the fact would miss it, and every wait would be a race against the server
+ * being quick.
  */
 function open(cookie: string, query: string): Promise<WebSocket> {
   const ws = new WebSocket(url(query), { headers: { Cookie: cookie } });
   sockets.push(ws);
+
+  const inbox: Inbox = { messages: [], failure: null, notify: null };
+  inboxes.set(ws, inbox);
+  ws.on('message', (raw: WebSocket.RawData) => {
+    inbox.messages.push(JSON.parse(raw.toString()) as ServerMessage);
+    inbox.notify?.();
+  });
+  ws.on('error', (err: Error) => {
+    // Hand the failure to whoever is waiting instead of making them sit out the
+    // whole timeout.
+    inbox.failure = err;
+    inbox.notify?.();
+  });
+
   return new Promise((resolve, reject) => {
     ws.on('open', () => {
       resolve(ws);
@@ -78,33 +107,35 @@ function open(cookie: string, query: string): Promise<WebSocket> {
 }
 
 /**
- * Resolves with the next message of type `type`. Heartbeat pings arrive on the
- * same wire and are skipped rather than treated as failures.
+ * Takes the next message of type `type` out of the socket's inbox, waiting for
+ * one only if none has arrived yet. Heartbeat pings share the wire and are left
+ * in the buffer rather than treated as failures.
  */
-function waitFor(ws: WebSocket, type: string, timeoutMs = 5000): Promise<ServerMessage> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`timed out waiting for a "${type}" message`));
-    }, timeoutMs);
-    const onMessage = (raw: WebSocket.RawData): void => {
-      const message = JSON.parse(raw.toString()) as ServerMessage;
-      if (message.type !== type) return;
-      cleanup();
-      resolve(message);
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      reject(err);
-    };
-    function cleanup(): void {
-      clearTimeout(timer);
-      ws.off('message', onMessage);
-      ws.off('error', onError);
-    }
-    ws.on('message', onMessage);
-    ws.on('error', onError);
-  });
+async function waitFor(ws: WebSocket, type: string, timeoutMs = 5000): Promise<ServerMessage> {
+  const inbox = inboxes.get(ws);
+  if (inbox === undefined) throw new Error('this socket was not opened through open()');
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    if (inbox.failure !== null) throw inbox.failure;
+    // Consumed, not peeked: a later wait for the same type must see the NEXT one.
+    const index = inbox.messages.findIndex((message) => message.type === type);
+    if (index !== -1) return inbox.messages.splice(index, 1)[0];
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(`timed out waiting for a "${type}" message`);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        inbox.notify = null;
+        resolve();
+      }, remaining);
+      inbox.notify = () => {
+        clearTimeout(timer);
+        inbox.notify = null;
+        resolve();
+      };
+    });
+  }
 }
 
 /** Resolves with the handshake error of a connection that must be refused. */
@@ -165,13 +196,13 @@ describe('WebSocket realtime layer', () => {
     }
 
     const wanted = [await seatId(instanceId, 1, 1), await seatId(instanceId, 1, 2)];
-    const holderDelta = waitFor(holderWs, 'delta');
-    const watcherDelta = waitFor(watcherWs, 'delta');
 
     await reserve(holder.userId, instanceId, wanted);
 
-    const mine = await holderDelta;
-    const theirs = await watcherDelta;
+    // Safe to wait only now: the inbox buffers whatever landed while `reserve`
+    // was still running.
+    const mine = await waitFor(holderWs, 'delta');
+    const theirs = await waitFor(watcherWs, 'delta');
 
     expect(mine.seq).toBe(snapshot.seq + 1);
     expect(theirs.seq).toBe(snapshot.seq + 1);
@@ -186,9 +217,8 @@ describe('WebSocket realtime layer', () => {
     }
 
     // `sync` re-sends the current state without moving the sequence forward.
-    const resynced = waitFor(holderWs, 'snapshot');
     holderWs.send(JSON.stringify({ type: 'sync' }));
-    const fresh = await resynced;
+    const fresh = await waitFor(holderWs, 'snapshot');
 
     expect(fresh.seq).toBe(mine.seq);
     expect(fresh.seats).toHaveLength(115);

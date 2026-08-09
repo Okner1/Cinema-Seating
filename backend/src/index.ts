@@ -21,6 +21,14 @@ async function main(): Promise<void> {
   startListener();
   startSweeper();
 
+  // `listen` reports failure (EADDRINUSE, EACCES) through an event rather than
+  // a rejected promise, so `main().catch` below would never see it and the
+  // process would sit there having bound nothing.
+  server.on('error', (err) => {
+    console.error('startup failed', err);
+    process.exit(1);
+  });
+
   server.listen(config.port, () => {
     console.log(`cinema backend listening on http://localhost:${config.port} (ws ${WS_PATH})`);
   });
