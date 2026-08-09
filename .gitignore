@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .env
+
+# root lockfile is an empty stub (root package has no deps; per-package lockfiles are the real ones)
+/pnpm-lock.yaml
