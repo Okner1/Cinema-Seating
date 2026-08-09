@@ -34,6 +34,12 @@ export function createApp(): express.Express {
   app.use('/api/auth', authRouter);
   app.use('/api/map-instances', instancesRouter);
   app.use('/api/reservations', reservationsRouter);
+  // Unrouted paths, after every router and before the error handler. Express'
+  // built-in fallback answers with an HTML page, which would be the only
+  // response in the API that is not the `{ error, code }` envelope.
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+  });
   app.use(errorHandler);
   return app;
 }
