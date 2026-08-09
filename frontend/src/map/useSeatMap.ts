@@ -66,7 +66,10 @@ function socketUrl(instanceId: number): string {
  * Owns a single websocket: applies `snapshot`/`delta` messages, answers `ping`
  * with `pong`, asks for a fresh snapshot (`sync`) whenever sequence numbers show
  * we missed something, and watches for a silent server (no ping within
- * 2×HEARTBEAT) so a half-open socket still counts as a disconnect. Drops are
+ * 2×HEARTBEAT — armed from the moment we start connecting) so neither a stalled
+ * handshake nor a half-open socket can hang us. `conn` turns `open` on the first
+ * snapshot, not on the handshake, so the overlay never lifts off stale seats.
+ * Drops are
  * retried with a fixed backoff; once the backoff list is exhausted the hook
  * parks in `failed` until `retryNow()`.
  */
@@ -112,6 +115,8 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
       socket = ws;
 
       let handled = false;
+      /** Set by the first snapshot — the point where this socket is actually usable. */
+      let live = false;
 
       /** Single funnel for "this socket is done", however we found out. */
       const down = () => {
@@ -125,7 +130,8 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
 
       const armWatchdog = () => {
         clearTimeout(watchdogTimer);
-        // No ping within two heartbeats: the socket may be open but the peer is gone.
+        // Nothing from the server within two heartbeats: it may never have finished
+        // connecting, or the socket is open but the peer is gone. Either way, retry.
         watchdogTimer = setTimeout(down, 2 * HEARTBEAT_MS);
       };
 
@@ -133,11 +139,10 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
       };
 
+      // The handshake alone proves nothing about the data: we stay covered by the
+      // overlay until the first snapshot replaces whatever stale seats we hold.
       ws.onopen = () => {
-        failures = 0;
         lastSeq = -1;
-        setConn('open');
-        setAttempt(0);
         armWatchdog();
       };
 
@@ -148,6 +153,14 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
         if (msg.type === 'snapshot') {
           lastSeq = msg.seq;
           setSeats(new Map(msg.seats.map((seat) => [seat.id, seat])));
+          if (!live) {
+            // First real data: only now is the connection worth calling good, so
+            // the retry budget resets here rather than at the handshake.
+            live = true;
+            failures = 0;
+            setConn('open');
+            setAttempt(0);
+          }
           return;
         }
 
@@ -174,6 +187,10 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
 
       ws.onerror = down;
       ws.onclose = down;
+
+      // Cover the CONNECTING phase too: a socket that never opens (proxy up,
+      // backend hung) would otherwise sit there until the browser gives up.
+      armWatchdog();
     }
 
     connect();
