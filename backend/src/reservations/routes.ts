@@ -1,7 +1,13 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { requireAuth } from '../auth/middleware.js';
-import { DomainError, modifyReservation, releaseReservation, reserve } from './service.js';
+import {
+  DomainError,
+  bookReservation,
+  modifyReservation,
+  releaseReservation,
+  reserve,
+} from './service.js';
 
 export const reservationsRouter: Router = Router();
 
@@ -86,6 +92,22 @@ reservationsRouter.patch('/:id/seats', requireAuth, async (req: Request, res: Re
     // along with every other id that cannot name a reservation.
     const updated = await modifyReservation(userId, Number(req.params.id), seatIds);
     res.status(200).json(updated);
+  } catch (err) {
+    respondError(res, err);
+  }
+});
+
+/**
+ * Confirms a held group. Idempotent: re-booking a group already booked by this
+ * same user answers 200 as well, so a double click cannot produce an error.
+ */
+reservationsRouter.post('/:id/book', requireAuth, async (req: Request, res: Response) => {
+  const userId = authedUserId(req, res);
+  if (userId === null) return;
+
+  try {
+    const booked = await bookReservation(userId, Number(req.params.id));
+    res.status(200).json(booked);
   } catch (err) {
     respondError(res, err);
   }

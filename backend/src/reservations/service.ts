@@ -28,6 +28,11 @@ export interface ReservationResult {
   seatIds: number[];
 }
 
+export interface BookingResult {
+  reservationId: number;
+  status: 'booked';
+}
+
 interface SeatRow {
   id: number;
   row_number: number;
@@ -504,6 +509,107 @@ export async function modifyReservation(
       expiresAt: toIso(updated.rows[0].expires_at),
       seatIds: orderedSeatIds,
     };
+  });
+}
+
+/**
+ * Turns a `held` group into a `booked` one. Terminal in the other direction: a
+ * booked group never expires, so `expires_at` stops meaning anything for it and
+ * `OCCUPANCY_SQL` counts it as occupied unconditionally.
+ *
+ * LOCK ORDER (mandated, and the whole reason this function is not three lines):
+ *
+ *  1. the reservation row `FOR UPDATE` — owner and status;
+ *  2. THEN the group's physical row, via the very same `LOCK_ROW_SQL` a reserve
+ *     takes. THESE SEAT LOCKS ARE LOAD-BEARING. A book that locked only its own
+ *     reservation row would share no lock with a concurrent `reserve`, which
+ *     locks only seats: the two would interleave freely, and a book could
+ *     confirm a hold that had already lapsed and whose seats the rival had
+ *     lawfully taken as the lazy-expiry winner. Taking the row's seats puts both
+ *     operations on the same queue, so exactly one of them decides the row;
+ *  3. THEN — and only then — the expiry decision.
+ *
+ * Step 3 re-reads the clock in a STATEMENT OF ITS OWN. Reusing a `live` flag
+ * computed alongside the step-1 lock (what `lockHeldReservation` returns, which
+ * is why this function does not use it) would compare against a clock read
+ * *before* the wait on the seat locks: under contention that wait is exactly
+ * where a hold runs out. `clock_timestamp()` re-reads the wall clock on every
+ * call; `now()` is frozen at `BEGIN` and would be stale from the first
+ * statement onwards.
+ *
+ * Re-booking an already-`booked` group of one's own succeeds silently. A double
+ * click is not an error, and reporting one would leave the user staring at a
+ * failure on seats they own.
+ */
+export async function bookReservation(
+  userId: number,
+  reservationId: number,
+): Promise<BookingResult> {
+  if (!isPositiveInt(userId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'userId must be a positive integer');
+  }
+  if (!isPositiveInt(reservationId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'reservationId must be a positive integer');
+  }
+
+  return withTransaction(async (client) => {
+    // --- (1) the reservation row ---------------------------------------------
+    // Inlined rather than delegated to `lockHeldReservation`: that helper both
+    // rejects every non-`held` status (closing the idempotent path below) and
+    // hands back a pre-seat-lock `live` flag this function must not use.
+    const found = await client.query<{ user_id: number; instance_id: number; status: string }>(
+      `SELECT user_id, instance_id, status
+       FROM reservations
+       WHERE id = $1
+       FOR UPDATE`,
+      [reservationId],
+    );
+    if (found.rows.length === 0) {
+      throw new DomainError('NOT_FOUND', 404, 'Reservation not found');
+    }
+    const reservation = found.rows[0];
+    if (reservation.user_id !== userId) {
+      throw new DomainError('FORBIDDEN', 403, 'This reservation belongs to another user');
+    }
+    if (reservation.status === 'booked') {
+      // Already ours and already confirmed: nothing to change, nothing to
+      // announce. Same answer as the first click.
+      return { reservationId, status: 'booked' as const };
+    }
+    if (reservation.status !== 'held') {
+      throw new DomainError('EXPIRED', 410, 'This reservation is no longer held');
+    }
+    const instanceId = reservation.instance_id;
+
+    // --- (2) the group's seats ------------------------------------------------
+    const current = await client.query<{ row_number: number }>(
+      `SELECT s.row_number
+       FROM reservation_seats rs
+       JOIN seats s ON s.id = rs.seat_id
+       WHERE rs.reservation_id = $1
+       LIMIT 1`,
+      [reservationId],
+    );
+    if (current.rows.length === 0) {
+      throw new DomainError('NOT_FOUND', 404, 'This reservation holds no seats');
+    }
+    await client.query(LOCK_ROW_SQL, [instanceId, current.rows[0].row_number]);
+
+    // --- (3) the expiry decision, on a clock read after the wait --------------
+    const fresh = await client.query<{ live: boolean }>(
+      `SELECT (expires_at > clock_timestamp()) AS live FROM reservations WHERE id = $1`,
+      [reservationId],
+    );
+    if (!fresh.rows[0].live) {
+      throw new DomainError('EXPIRED', 410, 'This hold has expired');
+    }
+
+    // --- (4) confirm ----------------------------------------------------------
+    await client.query(`UPDATE reservations SET status = 'booked' WHERE id = $1`, [reservationId]);
+
+    await notifySeatChanges(client, instanceId, reservationId);
+
+    return { reservationId, status: 'booked' as const };
   });
 }
 
