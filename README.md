@@ -84,7 +84,7 @@ Connect to `ws://<host>/api/ws?instanceId=<id>` (the auth cookie rides the hands
 
 ## ERD
 
-Diagram: `docs/erd/erd.png` (committed before submission). The shape:
+Diagram: `erd.png` at the repo root (committed before submission). The shape:
 
 ```
 users 1──* reservations *──1 map_instances
