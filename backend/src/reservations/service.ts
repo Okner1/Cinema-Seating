@@ -1,4 +1,4 @@
-import type { ClientBase } from 'pg';
+import type { ClientBase, PoolClient } from 'pg';
 import { config } from '../config.js';
 import { pool } from '../db/pool.js';
 import { findTrappedSeat, isConsecutive } from './rules.js';
@@ -103,6 +103,11 @@ const LOCK_ROW_SQL = `
  * occupancy read as a *new* statement, after the lock is held, gives it a fresh
  * snapshot that necessarily includes everything the rival committed.
  *
+ * `$3` is a reservation to EXCLUDE from the calculation, or NULL for none.
+ * `modifyReservation` re-validates a group against a world where its own seats
+ * are free: counted as occupied, the group's current seats would make it
+ * collide with itself, and no selection could ever be shrunk or slid sideways.
+ *
  * Returns every seat of the row, ordered — never a filtered subset. See the
  * note on `findTrappedSeat` in `reserve()`.
  */
@@ -111,12 +116,24 @@ const OCCUPANCY_SQL = `
          EXISTS (SELECT 1 FROM reservation_seats rs
                  JOIN reservations r ON r.id = rs.reservation_id
                  WHERE rs.seat_id = s.id
+                   AND ($3::int IS NULL OR rs.reservation_id <> $3)
                    AND (r.status = 'booked'
                         OR (r.status = 'held' AND r.expires_at > clock_timestamp()))
          ) AS occupied
   FROM seats s
   WHERE s.instance_id = $1 AND s.row_number = $2
   ORDER BY s.seat_number
+`;
+
+/**
+ * Resolves seat ids to their physical position. Seats are immutable rows (pure
+ * layout), so this needs no lock: nothing concurrent can move a seat to another
+ * row, and the answer is the same before or inside a transaction.
+ */
+const SEAT_LAYOUT_SQL = `
+  SELECT id, row_number, seat_number
+  FROM seats
+  WHERE id = ANY($1::int[]) AND instance_id = $2
 `;
 
 function toIso(value: Date | string): string {
@@ -132,10 +149,7 @@ function isPositiveInt(value: unknown): value is number {
  * anything touches the database, so a malformed request never opens a
  * transaction and never reaches SQL.
  */
-function normaliseSeatIds(instanceId: number, seatIds: number[]): number[] {
-  if (!isPositiveInt(instanceId)) {
-    throw new DomainError('INVALID_INPUT', 400, 'instanceId must be a positive integer');
-  }
+function normaliseSeatIds(seatIds: number[]): number[] {
   if (!Array.isArray(seatIds)) {
     throw new DomainError('INVALID_INPUT', 400, 'seatIds must be an array');
   }
@@ -152,6 +166,155 @@ function normaliseSeatIds(instanceId: number, seatIds: number[]): number[] {
     throw new DomainError('INVALID_INPUT', 400, 'At least one seat is required');
   }
   return unique;
+}
+
+/**
+ * Applies the two geometric rules — one row, no gaps — to a resolved selection,
+ * and returns where it sits. Pure arithmetic over immutable layout, so it holds
+ * whether it runs before `BEGIN` or between two locks.
+ */
+function assertGroupGeometry(
+  found: SeatRow[],
+  wanted: number[],
+): { rowNumber: number; orderedSeatIds: number[] } {
+  if (found.length !== wanted.length) {
+    // Unknown id, or an id belonging to a different instance. Same answer for
+    // both: from the caller's point of view the seat is not there.
+    throw new DomainError('NOT_FOUND', 404, 'One or more seats do not exist in this instance');
+  }
+  const rowNumber = found[0].row_number;
+  if (found.some((seat) => seat.row_number !== rowNumber)) {
+    throw new DomainError('DIFFERENT_ROWS', 400, 'All seats must be in the same row');
+  }
+  if (!isConsecutive(found.map((seat) => seat.seat_number))) {
+    throw new DomainError('NOT_CONSECUTIVE', 400, 'Seats must be consecutive');
+  }
+  const orderedSeatIds = [...found]
+    .sort((a, b) => a.seat_number - b.seat_number)
+    .map((seat) => seat.id);
+  return { rowNumber, orderedSeatIds };
+}
+
+/**
+ * The live-state rules, checked under the whole-row lock: every wanted seat is
+ * still there, none of them is taken, and the row the selection would leave
+ * behind strands nobody.
+ *
+ * `occupancy` MUST be the complete, sorted row as returned by `OCCUPANCY_SQL`:
+ * `findTrappedSeat` measures gaps by ARRAY INDEX, not by seat number, so a
+ * filtered array would silently close gaps that exist in reality. Nothing here
+ * removes an entry — the selection is overlaid on the `occupied` flag instead.
+ */
+function assertSelectionAvailable(occupancy: OccupancyRow[], wanted: number[]): void {
+  const selectedIds = new Set(wanted);
+
+  // Defensive: the row cannot lose seats under us (layout is static), but if it
+  // ever did, silently validating against a short row would corrupt the gap
+  // arithmetic below.
+  const lockedIds = new Set(occupancy.map((seat) => seat.id));
+  if (wanted.some((seatId) => !lockedIds.has(seatId))) {
+    throw new DomainError('NOT_FOUND', 404, 'One or more seats do not exist in this instance');
+  }
+
+  if (occupancy.some((seat) => selectedIds.has(seat.id) && seat.occupied)) {
+    throw new DomainError('SEAT_TAKEN', 409, 'One or more seats are no longer available');
+  }
+
+  const occupiedAfter = occupancy.map((seat) => ({
+    seatNumber: seat.seat_number,
+    occupied: seat.occupied || selectedIds.has(seat.id),
+  }));
+  const trapped = findTrappedSeat(occupiedAfter);
+  if (trapped !== null) {
+    throw new DomainError(
+      'TRAPPED_SEAT',
+      400,
+      `This selection would leave seat ${trapped} stranded on its own`,
+    );
+  }
+}
+
+/**
+ * Runs `body` in one transaction on one pooled connection.
+ *
+ * The isolation level is pinned explicitly: the whole design leans on READ
+ * COMMITTED's per-statement snapshots (see `OCCUPANCY_SQL`). A session default
+ * of REPEATABLE READ would freeze the snapshot for the whole transaction and
+ * silently bring the double-hold back.
+ */
+async function withTransaction<T>(body: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  let released = false;
+  try {
+    await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+    const result = await body(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // The connection is in an unknown state (the original error may well be
+      // "connection lost"). Destroy it instead of handing it back poisoned, and
+      // remember that, so `finally` does not release a second time.
+      console.error('ROLLBACK failed', rollbackErr);
+      // Flag first: if release() itself throws, `finally` must not release a
+      // second time and mask the original error.
+      released = true;
+      client.release(true);
+    }
+    throw err;
+  } finally {
+    if (!released) client.release();
+  }
+}
+
+interface HeldReservation {
+  instanceId: number;
+  live: boolean;
+}
+
+/**
+ * Takes the row lock on one reservation and answers the three ownership
+ * questions every mutation asks. This is the FIRST lock of both
+ * `modifyReservation` and `releaseReservation`, before any seat lock — the
+ * order mandated for deadlock freedom.
+ *
+ * `live` (still inside its hold window) is reported rather than enforced:
+ * modifying an expired hold is meaningless, releasing one is merely redundant.
+ * The flag is computed above the lock in the plan, so `clock_timestamp()` is
+ * read after the wait for the lock ends, never from a stale transaction clock.
+ */
+async function lockHeldReservation(
+  client: PoolClient,
+  userId: number,
+  reservationId: number,
+): Promise<HeldReservation> {
+  const found = await client.query<{
+    user_id: number;
+    instance_id: number;
+    status: string;
+    live: boolean;
+  }>(
+    `SELECT user_id, instance_id, status, (expires_at > clock_timestamp()) AS live
+     FROM reservations
+     WHERE id = $1
+     FOR UPDATE`,
+    [reservationId],
+  );
+  if (found.rows.length === 0) {
+    throw new DomainError('NOT_FOUND', 404, 'Reservation not found');
+  }
+  const reservation = found.rows[0];
+  if (reservation.user_id !== userId) {
+    // Deliberately distinct from NOT_FOUND: the id came from this user's own
+    // client, so there is nothing to hide by pretending it does not exist.
+    throw new DomainError('FORBIDDEN', 403, 'This reservation belongs to another user');
+  }
+  if (reservation.status !== 'held') {
+    throw new DomainError('EXPIRED', 410, 'This reservation is no longer held');
+  }
+  return { instanceId: reservation.instance_id, live: reservation.live };
 }
 
 /**
@@ -177,46 +340,17 @@ export async function reserve(
   if (!isPositiveInt(userId)) {
     throw new DomainError('INVALID_INPUT', 400, 'userId must be a positive integer');
   }
-  const wanted = normaliseSeatIds(instanceId, seatIds);
+  if (!isPositiveInt(instanceId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'instanceId must be a positive integer');
+  }
+  const wanted = normaliseSeatIds(seatIds);
 
   // --- pre-lock, lock-free geometry -----------------------------------------
-  // Seats are immutable rows (pure layout), so reading them outside the lock is
-  // safe: nothing concurrent can move a seat to another row.
-  const found = await pool.query<SeatRow>(
-    `SELECT id, row_number, seat_number
-     FROM seats
-     WHERE id = ANY($1::int[]) AND instance_id = $2`,
-    [wanted, instanceId],
-  );
-  if (found.rows.length !== wanted.length) {
-    // Unknown id, or an id belonging to a different instance. Same answer for
-    // both: from the caller's point of view the seat is not there.
-    throw new DomainError('NOT_FOUND', 404, 'One or more seats do not exist in this instance');
-  }
-
-  const rowNumber = found.rows[0].row_number;
-  if (found.rows.some((seat) => seat.row_number !== rowNumber)) {
-    throw new DomainError('DIFFERENT_ROWS', 400, 'All seats must be in the same row');
-  }
-  if (!isConsecutive(found.rows.map((seat) => seat.seat_number))) {
-    throw new DomainError('NOT_CONSECUTIVE', 400, 'Seats must be consecutive');
-  }
-
-  const selectedIds = new Set(wanted);
-  const orderedSeatIds = [...found.rows]
-    .sort((a, b) => a.seat_number - b.seat_number)
-    .map((seat) => seat.id);
+  const found = await pool.query<SeatRow>(SEAT_LAYOUT_SQL, [wanted, instanceId]);
+  const { rowNumber, orderedSeatIds } = assertGroupGeometry(found.rows, wanted);
 
   // --- transaction ----------------------------------------------------------
-  const client = await pool.connect();
-  let released = false;
-  try {
-    // Pinned explicitly: the whole design leans on READ COMMITTED's per-statement
-    // snapshots (see OCCUPANCY_SQL). A session default of REPEATABLE READ would
-    // freeze the snapshot for the whole transaction and silently bring the
-    // double-hold back.
-    await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-
+  return withTransaction(async (client) => {
     // Serialize this user's concurrent attempts on this instance. Without it
     // the one-group guard below is racy in exactly one way: two simultaneous
     // requests from the same user for seats in DIFFERENT rows lock disjoint
@@ -248,37 +382,12 @@ export async function reserve(
     }
 
     await client.query(LOCK_ROW_SQL, [instanceId, rowNumber]);
-    const occupancy = await client.query<OccupancyRow>(OCCUPANCY_SQL, [instanceId, rowNumber]);
-
-    // Defensive: the row cannot lose seats under us (layout is static), but if
-    // it ever did, silently validating against a short row would corrupt the
-    // gap arithmetic below.
-    const lockedIds = new Set(occupancy.rows.map((seat) => seat.id));
-    if (wanted.some((seatId) => !lockedIds.has(seatId))) {
-      throw new DomainError('NOT_FOUND', 404, 'One or more seats do not exist in this instance');
-    }
-
-    if (occupancy.rows.some((seat) => selectedIds.has(seat.id) && seat.occupied)) {
-      throw new DomainError('SEAT_TAKEN', 409, 'One or more seats are no longer available');
-    }
-
-    // `findTrappedSeat` measures gaps by ARRAY INDEX, not by seat number, so it
-    // must be handed the complete, gapless, sorted occupancy of the row.
-    // `OCCUPANCY_SQL` returns exactly that (every seat of the row, ORDER BY
-    // seat_number) and nothing here filters it — only the `occupied` flag is
-    // overlaid with this request's selection.
-    const occupiedAfter = occupancy.rows.map((seat) => ({
-      seatNumber: seat.seat_number,
-      occupied: seat.occupied || selectedIds.has(seat.id),
-    }));
-    const trapped = findTrappedSeat(occupiedAfter);
-    if (trapped !== null) {
-      throw new DomainError(
-        'TRAPPED_SEAT',
-        400,
-        `This selection would leave seat ${trapped} stranded on its own`,
-      );
-    }
+    const occupancy = await client.query<OccupancyRow>(OCCUPANCY_SQL, [
+      instanceId,
+      rowNumber,
+      null,
+    ]);
+    assertSelectionAvailable(occupancy.rows, wanted);
 
     const created = await client.query<{ id: number; expires_at: Date | string }>(
       `INSERT INTO reservations (user_id, instance_id, status, expires_at)
@@ -296,28 +405,133 @@ export async function reserve(
 
     await notifySeatChanges(client, instanceId, reservationId);
 
-    await client.query('COMMIT');
-
     return {
       reservationId,
       expiresAt: toIso(created.rows[0].expires_at),
       seatIds: orderedSeatIds,
     };
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch (rollbackErr) {
-      // The connection is in an unknown state (the original error may well be
-      // "connection lost"). Destroy it instead of handing it back poisoned, and
-      // remember that, so `finally` does not release a second time.
-      console.error('ROLLBACK failed', rollbackErr);
-      // Flag first: if release() itself throws, `finally` must not release a
-      // second time and mask the original error.
-      released = true;
-      client.release(true);
-    }
-    throw err;
-  } finally {
-    if (!released) client.release();
+  });
+}
+
+/**
+ * Replaces the seats of an existing `held` group with `seatIds` — the COMPLETE
+ * desired selection, not a delta. Emptying a group is `releaseReservation`, not
+ * a modification, so an empty set is `INVALID_INPUT`.
+ *
+ * LOCK ORDER — the reservation row first, its seat row second. `reserve` takes
+ * an advisory lock first and no reservation row lock; this function takes no
+ * advisory lock at all. The two orders therefore never cross, so no wait cycle
+ * can form. Skipping the advisory lock is safe here because the one-group rule
+ * is about *creating* a second group: this reservation already exists, and the
+ * `FOR UPDATE` on its row serialises concurrent edits of it by itself.
+ */
+export async function modifyReservation(
+  userId: number,
+  reservationId: number,
+  seatIds: number[],
+): Promise<ReservationResult> {
+  if (!isPositiveInt(userId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'userId must be a positive integer');
   }
+  if (!isPositiveInt(reservationId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'reservationId must be a positive integer');
+  }
+  const wanted = normaliseSeatIds(seatIds);
+
+  return withTransaction(async (client) => {
+    const { instanceId, live } = await lockHeldReservation(client, userId, reservationId);
+    if (!live) {
+      throw new DomainError('EXPIRED', 410, 'This hold has expired');
+    }
+
+    // Where the group sits today. A modification stays inside its own row: the
+    // group is one physical block, and landing it in another row is a different
+    // reservation, not an edit of this one.
+    const current = await client.query<{ row_number: number }>(
+      `SELECT s.row_number
+       FROM reservation_seats rs
+       JOIN seats s ON s.id = rs.seat_id
+       WHERE rs.reservation_id = $1
+       LIMIT 1`,
+      [reservationId],
+    );
+    if (current.rows.length === 0) {
+      throw new DomainError('NOT_FOUND', 404, 'This reservation holds no seats');
+    }
+    const currentRow = current.rows[0].row_number;
+
+    const found = await client.query<SeatRow>(SEAT_LAYOUT_SQL, [wanted, instanceId]);
+    const { rowNumber, orderedSeatIds } = assertGroupGeometry(found.rows, wanted);
+    if (rowNumber !== currentRow) {
+      throw new DomainError('DIFFERENT_ROWS', 400, 'A group can only be changed within its own row');
+    }
+
+    await client.query(LOCK_ROW_SQL, [instanceId, rowNumber]);
+    // Excluding this reservation makes its current seats read as free, which is
+    // what re-validation needs: the group must be judged against the row as it
+    // would look *without* it, not against its own footprint.
+    const occupancy = await client.query<OccupancyRow>(OCCUPANCY_SQL, [
+      instanceId,
+      rowNumber,
+      reservationId,
+    ]);
+    assertSelectionAvailable(occupancy.rows, wanted);
+
+    // Replace wholesale rather than diff: `seatIds` is the full desired set, and
+    // both statements run under the same row lock, so no reader can observe the
+    // gap between them.
+    await client.query(`DELETE FROM reservation_seats WHERE reservation_id = $1`, [reservationId]);
+    await client.query(
+      `INSERT INTO reservation_seats (reservation_id, seat_id)
+       SELECT $1::int, unnest($2::int[])`,
+      [reservationId, orderedSeatIds],
+    );
+
+    // A modification RESTARTS the hold window instead of inheriting what is left
+    // of it: the user is demonstrably still working on this group.
+    const updated = await client.query<{ expires_at: Date | string }>(
+      `UPDATE reservations
+       SET expires_at = clock_timestamp() + ($2 || ' minutes')::interval
+       WHERE id = $1
+       RETURNING expires_at`,
+      [reservationId, String(config.holdMinutes)],
+    );
+
+    await notifySeatChanges(client, instanceId, reservationId);
+
+    return {
+      reservationId,
+      expiresAt: toIso(updated.rows[0].expires_at),
+      seatIds: orderedSeatIds,
+    };
+  });
+}
+
+/**
+ * Gives up a `held` group. Terminal: a released reservation is never revived,
+ * the user simply reserves again.
+ *
+ * No seat lock is taken — releasing only ever *frees* seats, so it can neither
+ * double-book anything nor strand a neighbour (Rule 2 constrains selections, not
+ * cancellations). An expired-but-still-`held` row is released rather than
+ * refused: the seats were already free by then, and telling the user their
+ * cancel failed would be absurd.
+ */
+export async function releaseReservation(userId: number, reservationId: number): Promise<void> {
+  if (!isPositiveInt(userId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'userId must be a positive integer');
+  }
+  if (!isPositiveInt(reservationId)) {
+    throw new DomainError('INVALID_INPUT', 400, 'reservationId must be a positive integer');
+  }
+
+  await withTransaction(async (client) => {
+    const { instanceId } = await lockHeldReservation(client, userId, reservationId);
+
+    await client.query(`UPDATE reservations SET status = 'released' WHERE id = $1`, [
+      reservationId,
+    ]);
+
+    await notifySeatChanges(client, instanceId, reservationId);
+  });
 }
