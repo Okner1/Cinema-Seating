@@ -45,7 +45,8 @@ Fireberry full-stack home assignment. Authenticated users view a live seating ma
 ### REST API (mutations + metadata)
 - `GET /map-instances` → `[{id, name}]` (metadata only; seat state never comes from REST).
 - `POST /reservations` — body: instance id + array of seat identifiers. Creates a **held** reservation group, returns `{reservationId, expiresAt}`.
-- `PATCH /reservations/:id/seats` (or equivalent) — deselect a seat from a held group; server re-validates the remainder.
+- `PATCH /reservations/:id/seats` (or equivalent) — add or remove seats from the held group; the server re-validates the resulting set as a whole (same row, consecutive, Rule 2).
+- **One active held group per user per instance.** The first selection creates the group (POST); every later click/drag-end modifies it (PATCH) until it is booked, released, or expires. Since Rule 1 requires one row per group, extending into a different row is invalid — the client prevents it, the server rejects it. Modifying the group resets `expires_at` to now() + 15 min.
 - `DELETE /reservations/:id` — release the whole group (Reset).
 - `POST /reservations/:id/book` — flips the exact held group to booked.
 
