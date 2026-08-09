@@ -1,0 +1,9 @@
+{
+  "name": "cinema-assignment",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm -r --parallel --stream dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  }
+}
