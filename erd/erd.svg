@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" font-family="Segoe UI, Arial, sans-serif">
+  <rect width="960" height="640" fill="#ffffff"/>
+  <text x="480" y="26" text-anchor="middle" font-size="17" font-weight="bold" fill="#22222a">Cinema Reservation System — ERD</text>
+
+  <!-- users -->
+  <g>
+    <rect x="60" y="52" width="240" height="126" rx="8" fill="#fff" stroke="#44444c" stroke-width="1.5"/>
+    <rect x="60" y="52" width="240" height="28" rx="8" fill="#2f6df6"/>
+    <rect x="60" y="66" width="240" height="14" fill="#2f6df6"/>
+    <text x="180" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">users</text>
+    <text x="72" y="100" font-size="13" fill="#22222a">id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan></text>
+    <text x="72" y="122" font-size="13" fill="#22222a">username <tspan fill="#888" font-style="italic">UNIQUE</tspan></text>
+    <text x="72" y="144" font-size="13" fill="#22222a">password_hash</text>
+    <text x="72" y="166" font-size="13" fill="#22222a">created_at</text>
+  </g>
+
+  <!-- map_instances -->
+  <g>
+    <rect x="660" y="52" width="240" height="104" rx="8" fill="#fff" stroke="#44444c" stroke-width="1.5"/>
+    <rect x="660" y="52" width="240" height="28" rx="8" fill="#2f6df6"/>
+    <rect x="660" y="66" width="240" height="14" fill="#2f6df6"/>
+    <text x="780" y="71" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">map_instances</text>
+    <text x="672" y="100" font-size="13" fill="#22222a">id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan></text>
+    <text x="672" y="122" font-size="13" fill="#22222a">name <tspan fill="#888" font-style="italic">UNIQUE</tspan></text>
+    <text x="672" y="144" font-size="13" fill="#22222a">created_at</text>
+  </g>
+
+  <!-- reservations -->
+  <g>
+    <rect x="330" y="250" width="300" height="170" rx="8" fill="#fff" stroke="#44444c" stroke-width="1.5"/>
+    <rect x="330" y="250" width="300" height="28" rx="8" fill="#2f6df6"/>
+    <rect x="330" y="264" width="300" height="14" fill="#2f6df6"/>
+    <text x="480" y="269" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">reservations</text>
+    <text x="342" y="298" font-size="13" fill="#22222a">id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan></text>
+    <text x="342" y="320" font-size="13" fill="#22222a">user_id <tspan fill="#1a7a4a" font-weight="bold">FK → users</tspan></text>
+    <text x="342" y="342" font-size="13" fill="#22222a">instance_id <tspan fill="#1a7a4a" font-weight="bold">FK → map_instances</tspan></text>
+    <text x="342" y="364" font-size="13" fill="#22222a">status <tspan fill="#888" font-style="italic">held | booked | expired | released</tspan></text>
+    <text x="342" y="386" font-size="13" fill="#22222a">expires_at</text>
+    <text x="342" y="408" font-size="13" fill="#22222a">created_at</text>
+  </g>
+
+  <!-- seats -->
+  <g>
+    <rect x="660" y="290" width="260" height="148" rx="8" fill="#fff" stroke="#44444c" stroke-width="1.5"/>
+    <rect x="660" y="290" width="260" height="28" rx="8" fill="#2f6df6"/>
+    <rect x="660" y="304" width="260" height="14" fill="#2f6df6"/>
+    <text x="790" y="309" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">seats</text>
+    <text x="672" y="338" font-size="13" fill="#22222a">id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan></text>
+    <text x="672" y="360" font-size="13" fill="#22222a">instance_id <tspan fill="#1a7a4a" font-weight="bold">FK → map_instances</tspan></text>
+    <text x="672" y="382" font-size="13" fill="#22222a">row_number</text>
+    <text x="672" y="404" font-size="13" fill="#22222a">seat_number</text>
+    <text x="672" y="426" font-size="12" fill="#888" font-style="italic">UNIQUE (instance_id, row_number, seat_number)</text>
+  </g>
+
+  <!-- reservation_seats -->
+  <g>
+    <rect x="380" y="520" width="300" height="82" rx="8" fill="#fff" stroke="#44444c" stroke-width="1.5"/>
+    <rect x="380" y="520" width="300" height="28" rx="8" fill="#2f6df6"/>
+    <rect x="380" y="534" width="300" height="14" fill="#2f6df6"/>
+    <text x="530" y="539" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">reservation_seats</text>
+    <text x="392" y="568" font-size="13" fill="#22222a">reservation_id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan> <tspan fill="#1a7a4a" font-weight="bold">FK → reservations</tspan></text>
+    <text x="392" y="590" font-size="13" fill="#22222a">seat_id <tspan fill="#8a6d1a" font-weight="bold">PK</tspan> <tspan fill="#1a7a4a" font-weight="bold">FK → seats</tspan></text>
+  </g>
+
+  <!-- relationships: | = one side, crow's foot = many side -->
+  <g stroke="#44444c" stroke-width="1.5" fill="none">
+    <!-- users 1..* reservations -->
+    <path d="M180,178 V225 H420 V250"/>
+    <line x1="172" y1="190" x2="188" y2="190"/>
+    <path d="M411,236 L420,250 L429,236 M420,236 V250"/>
+    <!-- map_instances 1..* reservations -->
+    <path d="M720,156 V210 H540 V250"/>
+    <line x1="712" y1="168" x2="728" y2="168"/>
+    <path d="M531,236 L540,250 L549,236 M540,236 V250"/>
+    <!-- map_instances 1..* seats -->
+    <path d="M810,156 V290"/>
+    <line x1="802" y1="168" x2="818" y2="168"/>
+    <path d="M801,276 L810,290 L819,276 M810,276 V290"/>
+    <!-- reservations 1..* reservation_seats -->
+    <path d="M480,420 V520"/>
+    <line x1="472" y1="432" x2="488" y2="432"/>
+    <path d="M471,506 L480,520 L489,506 M480,506 V520"/>
+    <!-- seats 1..* reservation_seats -->
+    <path d="M790,438 V561 H680"/>
+    <line x1="782" y1="450" x2="798" y2="450"/>
+    <path d="M694,552 L680,561 L694,570 M694,561 H680"/>
+  </g>
+
+  <text x="60" y="620" font-size="12" fill="#888">Seat status is derived, never stored: booked / reserved (held &amp; not expired) / available — computed by joining seats → reservation_seats → reservations.</text>
+</svg>
