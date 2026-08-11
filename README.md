@@ -87,7 +87,7 @@ Connect to `ws://<host>/api/ws?instanceId=<id>` (the auth cookie rides the hands
 
 ## ERD
 
-![ERD](./erd.svg)
+![ERD](./erd/erd.svg)
 
 The shape in text:
 
