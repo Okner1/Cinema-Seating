@@ -1,4 +1,4 @@
-FROM node:20-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
@@ -9,7 +9,7 @@ COPY src ./src
 # but tsc only emits .ts files — copy it into dist explicitly.
 RUN pnpm build && cp src/db/schema.sql dist/db/schema.sql
 
-FROM node:20-slim
+FROM node:24-slim
 WORKDIR /app
 RUN corepack enable
 ENV NODE_ENV=production
