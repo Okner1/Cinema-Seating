@@ -63,7 +63,7 @@ Connect to `ws://<host>/api/ws?instanceId=<id>` (the auth cookie rides the hands
 - Every seat carries `status` (`available` / `reserved` / `booked`) and `mine`. User identity is never sent to clients, and a hold's expiry timestamp is only visible to its owner.
 - `myReservation` (`{id, seatIds, expiresAt}` or `null`) is the requesting user's active held group, restated on every message — so every tab of the same user shares one group: any tab can extend, book, or reset it, and all tabs see it change live.
 - `seq` is a per-instance monotonic counter. If a client sees a gap — or a ping whose `seq` doesn't match — it requests a snapshot. So a lost message costs at most ~5 seconds of staleness, never correctness.
-- Holds expire lazily (queries treat lapsed holds as free instantly); a background sweeper flips them to `expired` every 30 s and broadcasts so viewers see the seats open up.
+- Holds expire lazily (queries treat lapsed holds as free instantly — availability never waits on anything). Visibility of expiry is two-tier by design: the holder's own tabs send a `sync` cue when their countdown lapses (the server flips the hold under a guarded UPDATE and broadcasts, so all viewers update within milliseconds), while for holds whose owner is gone a background sweeper flips and broadcasts every 30 s — an accepted worst-case display delay, never a booking delay.
 
 ## Design decisions
 

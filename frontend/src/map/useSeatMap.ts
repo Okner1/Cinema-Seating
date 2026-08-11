@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 /** Server ping interval (fixed by the backend contract). */
 export const HEARTBEAT_MS = 5000;
@@ -40,6 +40,8 @@ export interface SeatMapState {
   attempt: number;
   /** Start over after `conn === 'failed'`. */
   retryNow: () => void;
+  /** Ask the server for authoritative state now (also flips lapsed holds). */
+  requestSync: () => void;
 }
 
 type ServerMessage =
@@ -94,6 +96,8 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
   // Bumping this re-runs the effect below, which is exactly "start over".
   const [retryToken, setRetryToken] = useState(0);
   const retryNow = useCallback(() => setRetryToken((t) => t + 1), []);
+  const syncRef = useRef<(() => void) | null>(null);
+  const requestSync = useCallback(() => syncRef.current?.(), []);
 
   useEffect(() => {
     setSeats(new Map());
@@ -153,6 +157,7 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
       const send = (msg: { type: 'pong' | 'sync' }) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
       };
+      syncRef.current = () => send({ type: 'sync' });
 
       // The handshake alone proves nothing about the data: we stay covered by the
       // overlay until the first snapshot replaces whatever stale seats we hold.
@@ -214,6 +219,7 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
 
     return () => {
       disposed = true;
+      syncRef.current = null;
       clearTimeout(reconnectTimer);
       clearTimeout(watchdogTimer);
       if (socket !== null) {
@@ -223,5 +229,5 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
     };
   }, [instanceId, retryToken]);
 
-  return { seats, myReservation, conn, attempt, retryNow };
+  return { seats, myReservation, conn, attempt, retryNow, requestSync };
 }

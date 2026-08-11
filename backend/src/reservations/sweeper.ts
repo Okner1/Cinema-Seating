@@ -44,6 +44,24 @@ export async function sweepExpiredHolds(): Promise<number[]> {
   return instanceIds;
 }
 
+// Instance-scoped variant, run when a client's `sync` cue suggests its hold
+// just lapsed. The guard makes a wrong or early cue a free no-op.
+export async function sweepInstanceHolds(instanceId: number): Promise<boolean> {
+  const swept = await pool.query(
+    `UPDATE reservations
+     SET status = 'expired'
+     WHERE instance_id = $1 AND status = 'held' AND expires_at <= clock_timestamp()
+     RETURNING id`,
+    [instanceId],
+  );
+  if (swept.rows.length === 0) return false;
+  await pool.query(`SELECT pg_notify($1, $2)`, [
+    SEAT_CHANGES_CHANNEL,
+    JSON.stringify({ instanceId }),
+  ]);
+  return true;
+}
+
 /**
  * Runs the sweep every `sweepIntervalMs`. A failed pass is logged and skipped:
  * the next one picks up exactly the same rows, since nothing about the query

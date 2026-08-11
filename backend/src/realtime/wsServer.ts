@@ -5,6 +5,7 @@ import type { Duplex } from 'node:stream';
 import { COOKIE_NAME, verifyToken } from '../auth/jwt.js';
 import { config } from '../config.js';
 import { pool } from '../db/pool.js';
+import { sweepInstanceHolds } from '../reservations/sweeper.js';
 import * as hub from './hub.js';
 import { getSnapshot } from './snapshot.js';
 
@@ -119,6 +120,11 @@ async function onMessage(client: ClientSocket, raw: RawData): Promise<void> {
     return;
   }
   if (type === 'sync') {
+    // Tidy, then truth: flip any lapsed holds first so the requester AND every
+    // other viewer (via the notify) see the seats free, not just this socket.
+    await sweepInstanceHolds(client.instanceId).catch((err: unknown) => {
+      console.error('[ws] sweep-on-sync failed', err);
+    });
     await sendSnapshot(client);
   }
 }

@@ -90,7 +90,8 @@ export default function MapPage() {
   const [instances, setInstances] = useState<MapInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [instanceId, setInstanceId] = useState<number | null>(null);
-  const { seats, myReservation: wsReservation, conn, attempt, retryNow } = useSeatMap(instanceId);
+  const { seats, myReservation: wsReservation, conn, attempt, retryNow, requestSync } =
+    useSeatMap(instanceId);
 
   const [myReservation, setMyReservation] = useState<MyReservation | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -246,7 +247,29 @@ export default function MapPage() {
     });
   };
 
-  const handleExpire = useCallback(() => setMyReservation(null), []);
+  // Expiry is the server's call, not the local clock's: the countdown hitting 0
+  // only asks for authoritative state; the resulting broadcast clears bar and
+  // grid together (or keeps them, if our clock ran fast). Once per hold.
+  const syncedExpiryRef = useRef<string | null>(null);
+  const handleExpire = useCallback(() => {
+    const expiresAt = myReservation === null ? null : myReservation.expiresAt;
+    if (expiresAt === null || syncedExpiryRef.current === expiresAt) return;
+    syncedExpiryRef.current = expiresAt;
+    requestSync();
+  }, [myReservation, requestSync]);
+
+  // A backgrounded tab throttles timers; on return, reconcile if the hold
+  // looks lapsed.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (myReservation !== null && Date.parse(myReservation.expiresAt) <= Date.now()) {
+        requestSync();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [myReservation, requestSync]);
 
   return (
     <Screen>
