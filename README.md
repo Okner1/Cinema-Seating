@@ -34,6 +34,8 @@ Frontend tests (selection rules, countdown) are pure and need no services.
 
 The backend suite includes concurrency race tests: two clients fighting over the same seats, two clients jointly creating a trapped seat, and a book/reserve interleaving that proves the wall-clock expiry check.
 
+Most backend tests intentionally run against a real Postgres rather than mocks: what they verify — row-lock blocking, statement-snapshot visibility, `clock_timestamp()` expiry, `pg_notify` delivery-on-commit — only exists in a real database. A mocked driver (or an in-memory emulator) has none of those mechanics, so a green suite would prove nothing. Pure logic stays in DB-free unit tests; in CI the database would be a service container using the same image.
+
 ## API
 
 All routes under `/api`. Errors always use the envelope `{ "error": string, "code": string }`.
