@@ -56,9 +56,10 @@ Password policy: at least 6 characters with an uppercase, a lowercase, and a dig
 
 Connect to `ws://<host>/api/ws?instanceId=<id>` (the auth cookie rides the handshake).
 
-- **Server → client:** `{type:"snapshot", seq, seats}` on connect and on request; `{type:"delta", seq, seats}` after any change (full recomputed seat list); `{type:"ping", seq}` every 5 s.
+- **Server → client:** `{type:"snapshot", seq, seats, myReservation}` on connect and on request; `{type:"delta", seq, seats, myReservation}` after any change (full recomputed seat list); `{type:"ping", seq}` every 5 s.
 - **Client → server:** `{type:"pong"}` (liveness), `{type:"sync"}` (request a fresh snapshot).
-- Every seat carries `status` (`available` / `reserved` / `booked`) and `mine`; user identity is never sent to other clients.
+- Every seat carries `status` (`available` / `reserved` / `booked`) and `mine`. User identity is never sent to clients, and a hold's expiry timestamp is only visible to its owner.
+- `myReservation` (`{id, seatIds, expiresAt}` or `null`) is the requesting user's active held group, restated on every message — so every tab of the same user shares one group: any tab can extend, book, or reset it, and all tabs see it change live.
 - `seq` is a per-instance monotonic counter. If a client sees a gap — or a ping whose `seq` doesn't match — it requests a snapshot. So a lost message costs at most ~5 seconds of staleness, never correctness.
 - Holds expire lazily (queries treat lapsed holds as free instantly); a background sweeper flips them to `expired` every 30 s and broadcasts so viewers see the seats open up.
 
@@ -84,7 +85,9 @@ Connect to `ws://<host>/api/ws?instanceId=<id>` (the auth cookie rides the hands
 
 ## ERD
 
-Diagram: `erd.png` at the repo root (committed before submission). The shape:
+![ERD](./erd.svg)
+
+The shape in text:
 
 ```
 users 1──* reservations *──1 map_instances
