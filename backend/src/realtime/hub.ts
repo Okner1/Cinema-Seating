@@ -45,9 +45,13 @@ export function currentSeq(instanceId: number): number {
   return seqs.get(instanceId) ?? 0;
 }
 
-/** Strips the owner and answers the only ownership question a client may ask. */
+/** Strips the owner and answers the only ownership question a client may ask.*/
 export function personalize(seats: SeatView[], userId: number): ClientSeatView[] {
-  return seats.map(({ userId: owner, ...seat }) => ({ ...seat, mine: owner === userId }));
+  return seats.map(({ userId: owner, ...seat }) => ({
+    ...seat,
+    mine: owner === userId,
+    expiresAt: owner === userId ? seat.expiresAt : null,
+  }));
 }
 
 /** Serialises and sends, unless the peer is already closing or closed. */
