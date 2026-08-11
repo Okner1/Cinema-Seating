@@ -5,19 +5,13 @@ import Overlay from '../map/Overlay';
 import ReservationBar from '../map/ReservationBar';
 import SeatGrid from '../map/SeatGrid';
 import { computeDragRange } from '../map/selection';
-import { useSeatMap, type Seat } from '../map/useSeatMap';
+import { useSeatMap, type MyReservation, type Seat } from '../map/useSeatMap';
 
 interface MapInstance {
   id: number;
   name: string;
 }
 
-/** The held group this browser owns, as last reported by a mutation response. */
-export interface MyReservation {
-  id: number;
-  seatIds: number[];
-  expiresAt: string;
-}
 
 /** Body of every reservation mutation that leaves a live hold behind. */
 interface ReservationResponse {
@@ -66,6 +60,26 @@ const ErrorText = styled.p`
   font-size: 14px;
 `;
 
+/** Fixed top-center error toast; click dismisses. */
+const TopToast = styled.button`
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  max-width: min(90vw, 560px);
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid #f0c2bc;
+  background: #fdf0ee;
+  color: #c0392b;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+`;
+
 /** In-flight drag: the seat it started on and the range reached so far. */
 interface Drag {
   anchor: Seat;
@@ -76,7 +90,7 @@ export default function MapPage() {
   const [instances, setInstances] = useState<MapInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [instanceId, setInstanceId] = useState<number | null>(null);
-  const { seats, conn, attempt, retryNow } = useSeatMap(instanceId);
+  const { seats, myReservation: wsReservation, conn, attempt, retryNow } = useSeatMap(instanceId);
 
   const [myReservation, setMyReservation] = useState<MyReservation | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -109,6 +123,12 @@ export default function MapPage() {
     setMyReservation(null);
     setActionError(null);
   }, [instanceId]);
+
+  // The WS restates our held group on every message — all tabs converge on it;
+  // mutation responses only pre-empt it for snappiness.
+  useEffect(() => {
+    setMyReservation(wsReservation);
+  }, [wsReservation]);
 
   /**
    * Run one reservation mutation. The response is the only thing that updates
@@ -230,6 +250,11 @@ export default function MapPage() {
 
   return (
     <Screen>
+      {actionError !== null && (
+        <TopToast role="alert" onClick={() => setActionError(null)}>
+          {actionError}
+        </TopToast>
+      )}
       <Title>Seat map</Title>
 
       <Select
@@ -264,7 +289,6 @@ export default function MapPage() {
             expiresAt={myReservation === null ? null : myReservation.expiresAt}
             seatCount={myReservation === null ? 0 : myReservation.seatIds.length}
             busy={pending}
-            error={actionError}
             onExpire={handleExpire}
             onBook={handleBook}
             onReset={handleReset}

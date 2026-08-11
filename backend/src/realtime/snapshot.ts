@@ -9,6 +9,8 @@ export interface SeatView {
   number: number;
   status: SeatStatus;
   userId: number | null;
+  /** Active reservation claiming this seat, if any. Never sent to clients raw. */
+  reservationId: number | null;
   expiresAt: string | null;
 }
 
@@ -21,6 +23,7 @@ interface SnapshotRow {
   row: number;
   number: number;
   r_status: string | null;
+  r_id: number | null;
   user_id: number | null;
   expires_at: Date | string | null;
 }
@@ -34,7 +37,7 @@ interface SnapshotRow {
  */
 const SNAPSHOT_SQL = `
   SELECT s.id, s.row_number AS row, s.seat_number AS number,
-         r.status AS r_status, r.user_id, r.expires_at
+         r.status AS r_status, r.id AS r_id, r.user_id, r.expires_at
   FROM seats s
   LEFT JOIN reservation_seats rs ON rs.seat_id = s.id
   LEFT JOIN reservations r ON r.id = rs.reservation_id
@@ -58,6 +61,7 @@ function toSeatView(row: SnapshotRow): SeatView {
     number: row.number,
     status,
     userId: occupied ? row.user_id : null,
+    reservationId: occupied ? row.r_id : null,
     expiresAt: occupied ? toIso(row.expires_at) : null,
   };
 }

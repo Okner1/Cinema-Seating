@@ -47,11 +47,34 @@ export function currentSeq(instanceId: number): number {
 
 /** Strips the owner and answers the only ownership question a client may ask.*/
 export function personalize(seats: SeatView[], userId: number): ClientSeatView[] {
-  return seats.map(({ userId: owner, ...seat }) => ({
+  return seats.map(({ userId: owner, reservationId: _rid, ...seat }) => ({
     ...seat,
     mine: owner === userId,
     expiresAt: owner === userId ? seat.expiresAt : null,
   }));
+}
+
+export interface MyReservationView {
+  id: number;
+  seatIds: number[];
+  expiresAt: string;
+}
+
+// Well-defined because reserve enforces one active held group per user per
+// instance; rides on every snapshot/delta so all of a user's tabs share it.
+export function myReservationOf(seats: SeatView[], userId: number): MyReservationView | null {
+  let id: number | null = null;
+  let expiresAt: string | null = null;
+  const seatIds: number[] = [];
+  for (const seat of seats) {
+    if (seat.userId !== userId || seat.status !== 'reserved') continue;
+    if (seat.reservationId === null || seat.expiresAt === null) continue;
+    id = seat.reservationId;
+    expiresAt = seat.expiresAt;
+    seatIds.push(seat.id);
+  }
+  if (id === null || expiresAt === null) return null;
+  return { id, seatIds, expiresAt };
 }
 
 /** Serialises and sends, unless the peer is already closing or closed. */
@@ -102,7 +125,12 @@ async function publish(instanceId: number, seats?: SeatView[]): Promise<void> {
   seqs.set(instanceId, seq);
 
   for (const socket of room) {
-    send(socket, { type: 'delta', seq, seats: personalize(state, socket.userId) });
+    send(socket, {
+      type: 'delta',
+      seq,
+      seats: personalize(state, socket.userId),
+      myReservation: myReservationOf(state, socket.userId),
+    });
   }
 }
 

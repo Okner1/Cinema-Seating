@@ -19,9 +19,22 @@ export interface Seat {
 
 export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'failed';
 
+/** The live held group this user owns, as the server reports it to every tab. */
+export interface MyReservation {
+  id: number;
+  seatIds: number[];
+  expiresAt: string;
+}
+
 export interface SeatMapState {
   /** Seats keyed by id. Replaced wholesale on every snapshot. */
   seats: Map<number, Seat>;
+  /**
+   * The user's active held group per the server — authoritative across tabs:
+   * every snapshot and delta restates it, so a tab that never created the group
+   * still learns its id and can modify it.
+   */
+  myReservation: MyReservation | null;
   conn: ConnState;
   /** Which reconnect attempt is in flight (0 while connected or before the first drop). */
   attempt: number;
@@ -30,8 +43,8 @@ export interface SeatMapState {
 }
 
 type ServerMessage =
-  | { type: 'snapshot'; seq: number; seats: Seat[] }
-  | { type: 'delta'; seq: number; seats: Seat[] }
+  | { type: 'snapshot'; seq: number; seats: Seat[]; myReservation?: MyReservation | null }
+  | { type: 'delta'; seq: number; seats: Seat[]; myReservation?: MyReservation | null }
   | { type: 'ping'; seq: number };
 
 function parseMessage(data: unknown): ServerMessage | null {
@@ -75,6 +88,7 @@ function socketUrl(instanceId: number): string {
  */
 export function useSeatMap(instanceId: number | null): SeatMapState {
   const [seats, setSeats] = useState<Map<number, Seat>>(() => new Map());
+  const [myReservation, setMyReservation] = useState<MyReservation | null>(null);
   const [conn, setConn] = useState<ConnState>('connecting');
   const [attempt, setAttempt] = useState(0);
   // Bumping this re-runs the effect below, which is exactly "start over".
@@ -83,6 +97,7 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
 
   useEffect(() => {
     setSeats(new Map());
+    setMyReservation(null);
     setConn('connecting');
     setAttempt(0);
     if (instanceId === null) return;
@@ -153,6 +168,7 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
         if (msg.type === 'snapshot') {
           lastSeq = msg.seq;
           setSeats(new Map(msg.seats.map((seat) => [seat.id, seat])));
+          setMyReservation(msg.myReservation ?? null);
           if (!live) {
             // First real data: only now is the connection worth calling good, so
             // the retry budget resets here rather than at the handshake.
@@ -176,6 +192,7 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
             for (const seat of msg.seats) next.set(seat.id, seat);
             return next;
           });
+          setMyReservation(msg.myReservation ?? null);
           return;
         }
 
@@ -206,5 +223,5 @@ export function useSeatMap(instanceId: number | null): SeatMapState {
     };
   }, [instanceId, retryToken]);
 
-  return { seats, conn, attempt, retryNow };
+  return { seats, myReservation, conn, attempt, retryNow };
 }

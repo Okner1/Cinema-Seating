@@ -95,7 +95,12 @@ function refuse(socket: Duplex, status: number, reason: string): void {
 async function sendSnapshot(client: ClientSocket): Promise<void> {
   const seq = hub.currentSeq(client.instanceId);
   const seats = await getSnapshot(client.instanceId);
-  hub.send(client, { type: 'snapshot', seq, seats: hub.personalize(seats, client.userId) });
+  hub.send(client, {
+    type: 'snapshot',
+    seq,
+    seats: hub.personalize(seats, client.userId),
+    myReservation: hub.myReservationOf(seats, client.userId),
+  });
 }
 
 /** Client frames: `{type:'pong'}` and `{type:'sync'}`. Anything else is ignored. */

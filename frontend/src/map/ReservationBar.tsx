@@ -34,24 +34,12 @@ const Button = styled.button<{ $primary?: boolean }>`
   }
 `;
 
-const Toast = styled.p`
-  flex-basis: 100%;
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid #f0c2bc;
-  background: #fdf0ee;
-  color: #c0392b;
-  font-size: 14px;
-`;
-
 export interface ReservationBarProps {
   /** Server timestamp the hold expires at, or `null` when nothing is held. */
   expiresAt: string | null;
   seatCount: number;
   /** A mutation is in flight — no second one until it settles. */
   busy: boolean;
-  error: string | null;
   onExpire: () => void;
   onBook: () => void;
   onReset: () => void;
@@ -69,7 +57,6 @@ export default function ReservationBar({
   expiresAt,
   seatCount,
   busy,
-  error,
   onExpire,
   onBook,
   onReset,
@@ -113,8 +100,6 @@ export default function ReservationBar({
       <Button type="button" disabled={!held || busy} onClick={onReset}>
         Reset
       </Button>
-
-      {error !== null && <Toast role="alert">{error}</Toast>}
     </Bar>
   );
 }
